@@ -5,7 +5,6 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "postbuild": "ls -la dist",
     "dev": "nodemon dist/server.js",
     "lint": "eslint . --ext .ts"
   },

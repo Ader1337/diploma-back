@@ -11,8 +11,9 @@ import { protect } from '../middleware/authMiddleware';
 const router = express.Router();
 
 // Маршрути для підписки
-router.post('/subscribe', protect as any, subscribeWebPush as any);
-router.post('/subscribe-native', protect as any, subscribeNativePush as any);
+router.post('/subscribe', protect as any, subscribeWebPush as any)
+router.post('/subscribe-native', subscribeNativePush as any);
+
 
 // Маршрути для відписки (опціонально)
 router.post('/unsubscribe', protect as any, unsubscribeWebPush as any);
