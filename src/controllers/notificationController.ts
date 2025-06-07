@@ -62,7 +62,7 @@ export const subscribeWebPush = async (req: Request, res: Response, next: NextFu
  */
 export const subscribeNativePush = async (req: Request, res: Response, next: NextFunction) => {
   const { token, platform } = req.body; // Отримуємо токен і платформу ('android' або 'ios')
-
+  console.log('Отримано нативний токен:', token, 'для платформи:', platform);
   if (!req.user) {
     return res.status(401).json({ message: 'Не авторизований' });
   }
