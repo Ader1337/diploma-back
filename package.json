@@ -6,8 +6,6 @@
     "build": "tsc",
     "start": "node server.js",
     "dev": "nodemon server.ts",
-    "start": "node server.js",
-    "dev": "nodemon src/server.ts",
     "lint": "eslint . --ext .ts"
   },
   "keywords": [],
