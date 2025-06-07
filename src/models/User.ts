@@ -2,7 +2,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
-// Інтерфейс для підписки на push (залишаємо як є)
+// --- Секція для Web Push сповіщень (залишається без змін) ---
 interface IPushSubscription extends Document {
   endpoint: string;
   expirationTime?: number | null;
@@ -21,15 +21,30 @@ const PushSubscriptionSchema: Schema<IPushSubscription> = new Schema({
   },
 });
 
-// Оновлений IUser
+
+// 👇 НОВИЙ ІНТЕРФЕЙС для нативних токенів 👇
+interface INativePushToken extends Document {
+    token: string;
+    platform: 'android' | 'ios';
+}
+
+// 👇 НОВА СХЕМА для нативних токенів 👇
+const NativePushTokenSchema: Schema<INativePushToken> = new Schema({
+    token: { type: String, required: true, unique: true },
+    platform: { type: String, enum: ['android', 'ios'], required: true },
+});
+
+
+// --- Оновлений головний інтерфейс користувача ---
 export interface IUser extends Document {
-  _id: mongoose.Types.ObjectId; // Чітко вказуємо тип для _id
+  _id: mongoose.Types.ObjectId;
   username: string;
   email: string;
   passwordHash: string;
   pushSubscriptions: IPushSubscription[];
-  createdAt: Date; // Додано для повноти, timestamps: true їх створює
-  updatedAt: Date; // Додано для повноти
+  nativePushTokens: INativePushToken[]; // 👈 Додано нове поле
+  createdAt: Date;
+  updatedAt: Date;
   comparePassword(password: string): Promise<boolean>;
 }
 
@@ -39,11 +54,13 @@ const UserSchema: Schema<IUser> = new Schema(
     email: { type: String, required: true, unique: true, trim: true, lowercase: true },
     passwordHash: { type: String, required: true },
     pushSubscriptions: [PushSubscriptionSchema],
+    nativePushTokens: [NativePushTokenSchema], // 👈 Додано нове поле до схеми
   },
-  { timestamps: true } // timestamps додають createdAt та updatedAt
+  { timestamps: true }
 );
 
-// Хук та метод comparePassword залишаються без змін
+// --- Хуки та методи залишаються без змін ---
+
 UserSchema.pre<IUser>('save', async function (next) {
   if (!this.isModified('passwordHash')) {
     return next();

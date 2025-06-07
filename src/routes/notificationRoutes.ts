@@ -1,11 +1,21 @@
+// src/routes/notificationRoutes.ts
 import express from 'express';
-import { subscribeToPush, unsubscribeFromPush } from '../controllers/notificationController';
+import {
+  subscribeWebPush,
+  subscribeNativePush,
+  unsubscribeWebPush,
+  unsubscribeNativePush
+} from '../controllers/notificationController';
 import { protect } from '../middleware/authMiddleware';
 
 const router = express.Router();
 
-// Захищаємо ці ендпоінти, щоб тільки авторизовані користувачі могли підписуватися
-router.post('/subscribe', protect as any, subscribeToPush as any);
-router.post('/unsubscribe', protect as any, unsubscribeFromPush as any); // Опціонально
+// Маршрути для підписки
+router.post('/subscribe', protect as any, subscribeWebPush as any);
+router.post('/subscribe-native', protect as any, subscribeNativePush as any);
+
+// Маршрути для відписки (опціонально)
+router.post('/unsubscribe', protect as any, unsubscribeWebPush as any);
+router.post('/unsubscribe-native', protect as any, unsubscribeNativePush as any);
 
 export default router;
