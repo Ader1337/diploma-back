@@ -1,138 +1,148 @@
 import cron from 'node-cron';
-import Task from '../models/Task';
-import User from '../models/User';
-import webpush, { PushSubscription } from 'web-push';
+import webpush from 'web-push';
+import admin from '../config/firebase'; // Імпортуємо наш ініціалізований Firebase Admin
+import Task, { ITask } from '../models/Task';
+import User, { IUser } from '../models/User';
 
-// Функція для надсилання сповіщень
-const sendPushNotification = async (subscription: PushSubscription, payload: string) => {
+// =======================================================
+// РОЗДІЛЕНІ ФУНКЦІЇ ДЛЯ НАДСИЛАННЯ СПОВІЩЕНЬ
+// =======================================================
+
+/**
+ * Надсилає сповіщення на ВЕБ-ПІДПИСКУ (для браузерів та Electron)
+ */
+async function sendWebPushNotification(subscription: any, payload: any, userId: string) {
   try {
-    // Налаштування VAPID ключів має бути тут або в глобальному конфігу
-    if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
-      console.error('VAPID ключі не налаштовані в .env файлі.');
-      return;
+    // Налаштування VAPID ключів
+    if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+        webpush.setVapidDetails(
+            `mailto:${process.env.VAPID_MAILTO || 'test@example.com'}`,
+            process.env.VAPID_PUBLIC_KEY,
+            process.env.VAPID_PRIVATE_KEY
+        );
+        await webpush.sendNotification(subscription, JSON.stringify(payload));
     }
-    webpush.setVapidDetails(
-      `mailto:${process.env.VAPID_MAILTO || 'test@example.com'}`,
-      process.env.VAPID_PUBLIC_KEY,
-      process.env.VAPID_PRIVATE_KEY
-    );
-
-    await webpush.sendNotification(subscription, payload);
-    console.log('Push-сповіщення успішно надіслано.');
   } catch (error: any) {
-    console.error('Помилка надсилання push-сповіщення:', error.body || error.message);
-    // Якщо підписка недійсна, її варто видалити з бази даних
-    if (error.statusCode === 404 || error.statusCode === 410) {
-      console.log('Видалення недійсної підписки...');
-      await User.updateOne(
-        { 'pushSubscriptions.endpoint': subscription.endpoint },
-        { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } }
-      );
+    // Якщо підписка застаріла, видаляємо її з бази
+    if (error.statusCode === 410 || error.statusCode === 404) {
+      console.log(`[Scheduler] Видалення недійсної ВЕБ-підписки для користувача ${userId}...`);
+      await User.findByIdAndUpdate(userId, { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } });
+    } else {
+      console.error('[Scheduler] Помилка Web Push:', error.body);
     }
   }
-};
+}
 
-// --- Логіка перевірки завдань ---
+/**
+ * Надсилає сповіщення на НАТИВНИЙ ТОКЕН (для мобільних)
+ */
+async function sendNativePushNotification(token: string, payload: any, userId: string) {
+  const message = {
+    token: token,
+    notification: {
+      title: payload.notification.title,
+      body: payload.notification.body,
+    },
+    data: payload.notification.data, // Дані для навігації
+    apns: { // Налаштування для iOS
+        payload: { aps: { 'content-available': 1 } }
+    }
+  };
 
-// 1. Перевірка завдань, для яких скоро дедлайн (нагадування за годину)
-const checkUpcomingTasks = async () => {
-  console.log('Запуск перевірки завдань для нагадувань...');
+  try {
+    await admin.messaging().send(message);
+  } catch (error: any) {
+    // Якщо токен недійсний, видаляємо його
+    if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
+      console.log(`[Scheduler] Видалення недійного NATIVE-токену для користувача ${userId}...`);
+      await User.findByIdAndUpdate(userId, { $pull: { nativePushTokens: { token: token } } });
+    } else {
+        console.error(`[Scheduler] Помилка FCM для токена ...${token.slice(-5)}:`, error.code || error.message);
+    }
+  }
+}
+
+// =======================================================
+// ОСНОВНА ЛОГІКА ПЛАНУВАЛЬНИКА
+// =======================================================
+
+/**
+ * Обробляє масив знайдених завдань, знаходить користувачів та надсилає їм сповіщення.
+ */
+async function processAndSend(tasks: (ITask & { user: IUser })[], type: 'reminder' | 'overdue') {
+  for (const task of tasks) {
+    const user = task.user;
+    if (!user) {
+      console.warn(`[Scheduler] Пропуск завдання ${task._id}, оскільки не знайдено користувача.`);
+      continue;
+    }
+
+    // Формуємо тіло сповіщення залежно від типу
+    const payload = {
+      notification: {
+        title: `⏰ Завдання: ${task.title}`,
+        body: type === 'reminder' ? 'Дедлайн настане менш ніж за годину!' : 'Ви не встигли виконати це завдання вчасно.',
+        icon: 'assets/icons/icon-96x96.png', // Іконка для веб/десктоп
+        data: { url: `/app/tasks/edit/${task._id}` } // Універсальне посилання
+      }
+    };
+
+    console.log(`[Scheduler] Обробка завдання "${task.title}" для користувача ${user.email}`);
+
+    // Надсилаємо на всі веб-підписки користувача
+    if (user.pushSubscriptions && user.pushSubscriptions.length > 0) {
+      console.log(`[Scheduler] Знайдено ${user.pushSubscriptions.length} ВЕБ-підписок. Надсилання...`);
+      await Promise.all(user.pushSubscriptions.map(sub => sendWebPushNotification(sub, payload, user._id.toString())));
+    }
+
+    // Надсилаємо на всі нативні токени користувача
+    if (user.nativePushTokens && user.nativePushTokens.length > 0) {
+      console.log(`[Scheduler] Знайдено ${user.nativePushTokens.length} НАTИВНИХ токенів. Надсилання...`);
+      await Promise.all(user.nativePushTokens.map(t => sendNativePushNotification(t.token, payload, user._id.toString())));
+    }
+
+    // Оновлюємо прапорець у завданні, щоб не надсилати повторно
+    if (type === 'reminder') {
+        task.reminderSent = true;
+    } else {
+        task.overdueNotificationSent = true;
+    }
+    await task.save();
+  }
+}
+
+const checkTasks = async () => {
   const now = new Date();
   const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000);
 
-  try {
-    const upcomingTasks = await Task.find({
-      isCompleted: false, // Завдання не виконано
-      reminderSent: false, // Нагадування ще не надсилалось
-      dueDate: {
-        $gte: now, // Дедлайн ще не настав
-        $lte: oneHourFromNow // Але настане протягом наступної години
-      }
-    }).populate('user'); // `populate` додає об'єкт користувача замість user ID
+  // 1. Знаходимо завдання для нагадування
+  const upcomingTasks = await Task.find({
+    isCompleted: false, reminderSent: false, dueDate: { $gte: now, $lte: oneHourFromNow }
+  }).populate('user');
 
-    console.log(`Знайдено ${upcomingTasks.length} завдань для нагадування.`);
+  if (upcomingTasks.length > 0) {
+    console.log(`[Scheduler] Знайдено ${upcomingTasks.length} завдань для НАГАДУВАННЯ.`);
+    await processAndSend(upcomingTasks as any[], 'reminder');
+  }
 
-    for (const task of upcomingTasks) {
-      const user = task.user as any; // Типізуємо як any для простоти доступу до полів
-      if (user && user.pushSubscriptions && user.pushSubscriptions.length > 0) {
-        const payload = JSON.stringify({
-         notification: { // <--- Ось цей ключовий об'єкт!
-          title: `🔔 Нагадування: ${task.title}`,
-          body: `Дедлайн вашого завдання настане менш ніж за годину!`,
-          icon: 'assets/icons/icon-96x96.png', // Цей шлях має бути доступний у вашому зібраному Angular-додатку
-          data: { url: `/tasks/${task._id}` }
-        }
-        });
+  // 2. Знаходимо прострочені завдання
+  const overdueTasks = await Task.find({
+    isCompleted: false, overdueNotificationSent: false, dueDate: { $lt: now }
+  }).populate('user');
 
-        // Надсилаємо сповіщення на всі підписки користувача
-        await Promise.all(
-            user.pushSubscriptions.map((sub: PushSubscription) => sendPushNotification(sub, payload))
-        );
-
-        // Позначаємо, що нагадування було надіслано
-        task.reminderSent = true;
-        await task.save();
-      }
-    }
-  } catch (error) {
-    console.error('Помилка під час перевірки завдань для нагадування:', error);
+  if (overdueTasks.length > 0) {
+    console.log(`[Scheduler] Знайдено ${overdueTasks.length} ПРОСТРОЧЕНИХ завдань.`);
+    await processAndSend(overdueTasks as any[], 'overdue');
   }
 };
 
-
-// 2. Перевірка прострочених завдань
-const checkOverdueTasks = async () => {
-  console.log('Запуск перевірки прострочених завдань...');
-  const now = new Date();
-
-  try {
-    const overdueTasks = await Task.find({
-      isCompleted: false, // Завдання не виконано
-      overdueNotificationSent: false, // Сповіщення про прострочення не надсилалось
-      dueDate: { $lt: now } // Дедлайн вже минув
-    }).populate('user');
-
-    console.log(`Знайдено ${overdueTasks.length} прострочених завдань.`);
-
-    for (const task of overdueTasks) {
-      const user = task.user as any;
-      if (user && user.pushSubscriptions && user.pushSubscriptions.length > 0) {
-        const payload = JSON.stringify({
-          notification: { // <--- І тут також!
-          title: `⏰ Прострочене завдання: ${task.title}`,
-          body: `Ви не встигли виконати це завдання вчасно.`,
-          icon: 'assets/icons/icon-96x96.png',
-          data: { url: `/tasks/${task._id}` }
-        }
-        });
-
-        await Promise.all(
-            user.pushSubscriptions.map((sub: PushSubscription) => sendPushNotification(sub, payload))
-        );
-
-        // Позначаємо, що сповіщення про прострочення було надіслано
-        task.overdueNotificationSent = true;
-        await task.save();
-      }
-    }
-  } catch (error) {
-    console.error('Помилка під час перевірки прострочених завдань:', error);
-  }
-};
-
-
-// --- Ініціалізація планувальника ---
-
+/**
+ * Головна функція, яка запускає cron-завдання.
+ */
 export const startNotificationScheduler = () => {
-  // Запускати перевірку кожну хвилину. Для продакшену можна рідше, наприклад, кожні 5-15 хвилин.
-  // Cron-синтаксис: '*/1 * * * *' - кожну хвилину
   cron.schedule('*/1 * * * *', () => {
-    console.log('----------------------------------------------------');
-    console.log(`Планувальник запущено о ${new Date().toLocaleTimeString()}`);
-    checkUpcomingTasks();
-    checkOverdueTasks();
-    console.log('----------------------------------------------------');
+    console.log(`--- [${new Date().toLocaleTimeString()}] Запуск перевірки завдань ---`);
+    checkTasks().catch(err => console.error('[Scheduler] Глобальна помилка в cron-завданні:', err));
   });
-
-  console.log('Планувальник сповіщень успішно налаштовано!  cron.schedule(*/1 * * * *)');
+  console.log('Планувальник сповіщень успішно налаштовано!');
 };

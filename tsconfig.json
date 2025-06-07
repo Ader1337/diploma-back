@@ -12,7 +12,8 @@
   },
   "include": [
     "server.ts",
-    "src/**/*"
+    "src/**/*",
+    "test-fcm.ts"
   ],
   "exclude": [
     "node_modules",
